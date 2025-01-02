@@ -44,7 +44,10 @@ class VehicleMav:
         Set this vehicle to takeoff
         """
         if 'TAKEOFF' in self.modes:
-            self.conn.mav.set_mode_send(self.conn.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, self.modes['TAKEOFF'])
+            self.conn.mav.set_mode_send(
+                self.conn.target_system,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                self.modes['TAKEOFF'])
             print("takeoff")
 
     def next_message(self):
@@ -62,22 +65,43 @@ class VehicleMav:
                     print(self.wp.wp(msg.seq))
                     self.conn.mav.send(self.wp.wp(msg.seq))
                 if msg.get_type() == "MISSION_ACK":
-                    self.conn.mav.set_mode_send(self.conn.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, self.modes['AUTO'])
+                    self.conn.mav.set_mode_send(
+                        self.conn.target_system,
+                        mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                        self.modes['AUTO'])
                     self.arm()
                 return msg
 
-    def set_continue(self):
+    def set_continue(self) -> None:
+        """
+        Continue with the mission
+        """
         self.arm()
 
     def set_rtl(self) -> None:
+        """
+        Set the auto-pilot to return to launch mode
+        """
         if 'RTL' in self.modes:
-            self.conn.set_mode_send(self.conn.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, self.modes['RTL'])
+            self.conn.mav.set_mode_send(
+                self.conn.target_system,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                self.modes['RTL'])
 
     def set_circle(self) -> None:
+        """
+        Set the auto-pilot to circle/hold at the current location
+        """
         if 'CIRCLE' in self.modes:
-            self.conn.set_mode_send(self.conn.target_system, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, self.modes['CIRCLE'])
+            self.conn.mav.set_mode_send(
+                self.conn.target_system,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                self.modes['CIRCLE'])
 
-    def set_goto(self, point) -> None:
+    def set_goto(self, point: SMMPoint) -> None:
+        """
+        Goto a speific point
+        """
         self.wp = mavwp.MAVWPLoader(self.conn.target_system)
         self.wp.add(
             mavutil.mavlink.MAVLink_mission_item_int_message(
@@ -157,7 +181,11 @@ class VehicleMav:
 
 
 class SMM:
-    def __init__(self, url, username, password, asset_name, autopilot: VehicleMav):
+    """
+    Class to interact with SMM as an asset
+    """
+    def __init__(self, url, username, password, asset_name, autopilot: VehicleMav) -> None:
+        # pylint: disable=R0913,R0917
         self.mavlink = autopilot
         self.conn = SMMConnection(url, username, password)
         for asset in self.conn.get_assets():
@@ -166,7 +194,11 @@ class SMM:
         self.last_command_timestamp = None
         self.last_command = None
 
-    def update_position(self, lat, lon, fix, alt, cog):
+    def update_position(self, lat, lon, fix, alt, cog) -> None:
+        # pylint: disable=R0913,R0917
+        """
+        Update the position of this asset
+        """
         cmd = self.asset.set_position(lat, lon, fix, alt, cog)
         if cmd is not None:
             self.process_cmd(cmd)
@@ -210,13 +242,13 @@ if __name__ == "__main__":
     smm = SMM(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], mavlink)
 
     while True:
-        msg = mavlink.next_message()
-        if msg.get_type() == "GPS_RAW_INT":
-            if msg.fix_type in (0, 1):
+        mavmsg = mavlink.next_message()
+        if mavmsg.get_type() == "GPS_RAW_INT":
+            if mavmsg.fix_type in (0, 1):
                 continue
             smm.update_position(
-                msg.lat / 10000000,
-                msg.lon / 10000000,
-                2 if msg.fix_type == 2 else 3,
-                msg.alt / 1000,
-                msg.cog / 100)
+                mavmsg.lat / 10000000,
+                mavmsg.lon / 10000000,
+                2 if mavmsg.fix_type == 2 else 3,
+                mavmsg.alt / 1000,
+                mavmsg.cog / 100)
