@@ -6,6 +6,7 @@ Connect a device that supports that mavlink to SMM as an asset
 import sys
 
 from smm_client.connection import SMMConnection
+from smm_client.search import SMMSearch
 from smm_client.types import SMMPoint
 
 from pymavlink import mavutil, mavwp
@@ -18,6 +19,7 @@ class VehicleMav:
     def __init__(self, connstr: str) -> None:
         self.conn = mavutil.mavlink_connection(connstr)
         self.conn.wait_heartbeat()
+        self.search_id = None
         self.wp = None
 
     @property
@@ -61,6 +63,8 @@ class VehicleMav:
             if msg.get_type() == "BAD_DATA":
                 print("Bad data")
             else:
+                if msg.get_type().startswith("MISSION") or msg.get_type() == "STATUSTEXT":
+                    print(msg)
                 if msg.get_type() in ("MISSION_REQUEST", "MISSION_REQUEST_INT"):
                     print(self.wp.wp(msg.seq))
                     self.conn.mav.send(self.wp.wp(msg.seq))
@@ -71,12 +75,6 @@ class VehicleMav:
                         self.modes['AUTO'])
                     self.arm()
                 return msg
-
-    def set_continue(self) -> None:
-        """
-        Continue with the mission
-        """
-        self.arm()
 
     def set_rtl(self) -> None:
         """
@@ -102,6 +100,7 @@ class VehicleMav:
         """
         Goto a speific point
         """
+        self.search_id = None
         self.wp = mavwp.MAVWPLoader(self.conn.target_system)
         self.wp.add(
             mavutil.mavlink.MAVLink_mission_item_int_message(
@@ -179,6 +178,74 @@ class VehicleMav:
         print(self.wp.count())
         self.conn.waypoint_count_send(self.wp.count())
 
+    def load_search(self, coords: list[SMMPoint], search_id: int):
+        """
+        Load a search into the autopilot
+        """
+        self.search_id = search_id
+        point = coords[0]
+        self.wp = mavwp.MAVWPLoader(self.conn.target_system)
+        self.wp.add(
+            mavutil.mavlink.MAVLink_mission_item_int_message(
+                self.conn.target_system,
+                self.conn.target_component,
+                0,
+                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+                0,
+                1,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                int(point.lat * 10000000),
+                int(point.lng * 10000000),
+                int(20)
+            )
+        )
+        self.wp.add(
+            mavutil.mavlink.MAVLink_mission_item_int_message(
+                self.conn.target_system,
+                self.conn.target_component,
+                1,
+                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+                1,
+                1,
+                0.0,
+                10.0,
+                0.0,
+                0.0,
+                int(point.lat * 10000000),
+                int(point.lng * 10000000),
+                int(20)
+            )
+        )
+        seq = 2
+        for point in coords:
+            self.wp.add(
+                mavutil.mavlink.MAVLink_mission_item_int_message(
+                    self.conn.target_system,
+                    self.conn.target_component,
+                    seq,
+                    mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                    mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+                    0,
+                    1,
+                    0.0,
+                    10.0,
+                    0.0,
+                    0.0,
+                    int(point.lat * 10000000),
+                    int(point.lng * 10000000),
+                    int(20)
+                )
+            )
+            seq = seq + 1
+        self.conn.waypoint_clear_all_send()
+        print(self.wp.count())
+        self.conn.waypoint_count_send(self.wp.count())
+
 
 class SMM:
     """
@@ -193,6 +260,23 @@ class SMM:
                 self.asset = asset
         self.last_command_timestamp = None
         self.last_command = None
+        self.current_search: SMMSearch | None = None
+
+    def load_search(self, lat, lon):
+        """
+        Load a search into the flight controller
+        """
+        if self.current_search is None:
+            search = self.asset.get_next_search(lat, lon)
+            if search is not None and search.begin(self.asset):
+                self.current_search = search
+            else:
+                return
+        if self.mavlink.search_id != self.current_search.id:
+            print(self.current_search.get_data())
+            self.mavlink.load_search(
+                self.current_search.get_data().coords,
+                self.current_search.id)
 
     def update_position(self, lat, lon, fix, alt, cog) -> None:
         # pylint: disable=R0913,R0917
@@ -202,6 +286,8 @@ class SMM:
         cmd = self.asset.set_position(lat, lon, fix, alt, cog)
         if cmd is not None:
             self.process_cmd(cmd)
+        if self.last_command == "Continue":
+            self.load_search(lat, lon)
 
     def process_cmd(self, command):
         """
@@ -211,9 +297,6 @@ class SMM:
             return
         self.last_command_timestamp = command.issued
         self.last_command = command.command
-        if command.command == "Continue":
-            # Set AP back to auto mode
-            self.mavlink.set_continue()
         if command.command == "Circle":
             # Set AP to circle mode
             self.mavlink.set_circle()
