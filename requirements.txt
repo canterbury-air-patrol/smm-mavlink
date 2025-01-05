@@ -1,4 +1,4 @@
-smm-client==0.0.14
+smm-client==0.0.15
 pymavlink==2.4.42
 
 # code checking
