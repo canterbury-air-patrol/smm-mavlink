@@ -6,6 +6,7 @@ Connect a device that supports that mavlink to SMM as an asset
 import sys
 
 from smm_client.connection import SMMConnection
+from smm_client.missions import SMMMission
 from smm_client.search import SMMSearch
 from smm_client.types import SMMPoint
 
@@ -248,6 +249,7 @@ class VehicleMav:
 
 
 class SMM:
+    # pylint: disable=R0902
     """
     Class to interact with SMM as an asset
     """
@@ -261,6 +263,27 @@ class SMM:
         self.last_command_timestamp = None
         self.last_command = None
         self.current_search: SMMSearch | None = None
+        self.mission: SMMMission | None = None
+        self.mission_asset_statuses = {}
+        for mission_status in self.conn.get_mission_asset_status_values():
+            self.mission_asset_statuses[mission_status.name] = mission_status
+
+    def update_mission(self):
+        """
+        Update which mission this asset is in
+        """
+        self.mission = SMMMission.get_mission_for_asset(self.asset)
+        return self.mission is not None
+
+    def set_mission_status(self, status_name: str, status_text: str = ""):
+        """
+        Set the status of this asset in the mission
+        """
+        if status_name in self.mission_asset_statuses and self.update_mission():
+            self.mission.set_asset_status(
+                self.asset,
+                self.mission_asset_statuses[status_name],
+                status_text)
 
     def load_search(self, lat, lon):
         """
@@ -277,6 +300,7 @@ class SMM:
             self.mavlink.load_search(
                 self.current_search.get_data().coords,
                 self.current_search.id)
+            self.set_mission_status("Searching")
 
     def update_position(self, lat, lon, fix, alt, cog) -> None:
         # pylint: disable=R0913,R0917
@@ -306,6 +330,7 @@ class SMM:
         if command.command == "Goto position":
             # Set AP to goto command.position
             self.mavlink.set_goto(command.position)
+            self.set_mission_status("Investigating")
         print(command)
 
 
