@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Connect a device that supports that mavlink to SMM as an asset
+Connect a device that supports mavlink to SMM as an asset
 """
 
 import sys
@@ -22,6 +22,8 @@ class VehicleMav:
         self.conn.wait_heartbeat()
         self.search_id = None
         self.wp = None
+        self.on_search_complete = None
+        self.on_search_begin = None
 
     @property
     def modes(self):
@@ -66,6 +68,13 @@ class VehicleMav:
             else:
                 if msg.get_type().startswith("MISSION") or msg.get_type() == "STATUSTEXT":
                     print(msg)
+                if msg.get_type() == "MISSION_CURRENT" and self.search_id is not None:
+                    if msg.seq == 3 and msg.mission_state == mavutil.mavlink.MISSION_STATE_ACTIVE and self.on_search_begin is not None:
+                        self.on_search_begin(self.search_id)
+                        self.on_search_begin = None
+                    if msg.mission_state == mavutil.mavlink.MISSION_STATE_COMPLETE and self.on_search_begin is None and self.on_search_complete is not None:
+                        self.on_search_complete(self.search_id)
+                        self.search_id = None
                 if msg.get_type() in ("MISSION_REQUEST", "MISSION_REQUEST_INT"):
                     print(self.wp.wp(msg.seq))
                     self.conn.mav.send(self.wp.wp(msg.seq))
@@ -179,11 +188,13 @@ class VehicleMav:
         print(self.wp.count())
         self.conn.waypoint_count_send(self.wp.count())
 
-    def load_search(self, coords: list[SMMPoint], search_id: int):
+    def load_search(self, coords: list[SMMPoint], search_id: int, on_search_begin, on_search_complete) -> None:
         """
         Load a search into the autopilot
         """
         self.search_id = search_id
+        self.on_search_begin = on_search_begin
+        self.on_search_complete = on_search_complete
         point = coords[0]
         self.wp = mavwp.MAVWPLoader(self.conn.target_system)
         self.wp.add(
@@ -285,6 +296,23 @@ class SMM:
                 self.mission_asset_statuses[status_name],
                 status_text)
 
+    def search_begin(self, search_id: int):
+        """
+        Callback for when a search begins
+        """
+        if self.current_search is not None and self.current_search.id == search_id:
+            self.set_mission_status("Searching")
+
+    def search_complete(self, search_id: int):
+        """
+        Callback for when a search is complete
+        """
+        if self.current_search is not None and self.current_search.id == search_id:
+            self.current_search.finished(self.asset)
+            self.set_mission_status("Search Complete")
+            self.current_search = None
+            self.mavlink.set_rtl()
+
     def load_search(self, lat, lon):
         """
         Load a search into the flight controller
@@ -299,8 +327,10 @@ class SMM:
             print(self.current_search.get_data())
             self.mavlink.load_search(
                 self.current_search.get_data().coords,
-                self.current_search.id)
-            self.set_mission_status("Searching")
+                self.current_search.id,
+                self.search_begin,
+                self.search_complete)
+            self.set_mission_status("Enroute")
 
     def update_position(self, lat, lon, fix, alt, cog) -> None:
         # pylint: disable=R0913,R0917
@@ -326,6 +356,7 @@ class SMM:
             self.mavlink.set_circle()
         if command.command in ("Return to Launch", "Mission Complete"):
             # Set AP to RTL
+            self.set_mission_status("Returning to Base")
             self.mavlink.set_rtl()
         if command.command == "Goto position":
             # Set AP to goto command.position
