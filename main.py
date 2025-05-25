@@ -4,6 +4,7 @@ Connect a device that supports mavlink to SMM as an asset
 """
 
 import sys
+from typing import Callable
 
 from smm_client.connection import SMMConnection
 from smm_client.missions import SMMMission
@@ -22,8 +23,21 @@ class VehicleMav:
         self.conn.wait_heartbeat()
         self.search_id = None
         self.wp = None
-        self.on_search_complete = None
-        self.on_search_begin = None
+        self.search_state = None
+        self._events: dict[str, Callable] = {}
+
+    def on(self, event: str, fn: Callable) -> None:
+        """
+        Register a callback for an event
+        """
+        self._events[event] = fn
+
+    def _emit(self, event: str, *args) -> None:
+        """
+        Emit an event
+        """
+        if fn := self._events.pop(event, None):
+            fn(*args)
 
     @property
     def modes(self):
@@ -55,36 +69,62 @@ class VehicleMav:
                 self.modes['TAKEOFF'])
             print("takeoff")
 
+    MISSION_FIRST_ACTUAL_WAY_POINT_SEQUENCE = 3
+
+    def _handle_mission_current(self, msg):
+        """
+        Handle a MISSION_CURRENT message
+        """
+        if msg.seq == self.MISSION_FIRST_ACTUAL_WAY_POINT_SEQUENCE \
+                and msg.mission_state == mavutil.mavlink.MISSION_STATE_ACTIVE \
+                and self.search_state == "Enroute":
+            self._emit("search_begin", self.search_id)
+            self.search_state = "Searching"
+        if msg.mission_state == mavutil.mavlink.MISSION_STATE_COMPLETE \
+                and self.search_state == "Searching":
+            self._emit("search_complete", self.search_id)
+            self.search_state = "Complete"
+            self.search_id = None
+
+    def _handle_mission_request(self, msg) -> None:
+        """
+        Handle a MISSION_REQUEST or MISSION_REQUEST_INT message
+        """
+        print(self.wp.wp(msg.seq))
+        self.conn.mav.send(self.wp.wp(msg.seq))
+
+    # pylint: disable=unused-argument
+    def _handle_mission_ack(self, msg) -> None:
+        """
+        Handle a MISSION_ACK message
+        """
+        self.conn.mav.set_mode_send(
+            self.conn.target_system,
+            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            self.modes['AUTO'])
+        self.search_state = "Enroute"
+        self.arm()
+
     def next_message(self):
         """
         Get the next message from this vehicle
         """
+        handlers = {
+            "MISSION_CURRENT": self._handle_mission_current,
+            "MISSION_REQUEST": self._handle_mission_request,
+            "MISSION_REQUEST_INT": self._handle_mission_request,
+            "MISSION_ACK": self._handle_mission_ack,
+        }
         while True:
             msg = self.conn.recv_match(blocking=True)
-            if not msg:
+            if not msg or msg.get_type() == "BAD_DATA":
                 continue
-            if msg.get_type() == "BAD_DATA":
-                print("Bad data")
-            else:
-                if msg.get_type().startswith("MISSION") or msg.get_type() == "STATUSTEXT":
-                    print(msg)
-                if msg.get_type() == "MISSION_CURRENT" and self.search_id is not None:
-                    if msg.seq == 3 and msg.mission_state == mavutil.mavlink.MISSION_STATE_ACTIVE and self.on_search_begin is not None:
-                        self.on_search_begin(self.search_id)
-                        self.on_search_begin = None
-                    if msg.mission_state == mavutil.mavlink.MISSION_STATE_COMPLETE and self.on_search_begin is None and self.on_search_complete is not None:
-                        self.on_search_complete(self.search_id)
-                        self.search_id = None
-                if msg.get_type() in ("MISSION_REQUEST", "MISSION_REQUEST_INT"):
-                    print(self.wp.wp(msg.seq))
-                    self.conn.mav.send(self.wp.wp(msg.seq))
-                if msg.get_type() == "MISSION_ACK":
-                    self.conn.mav.set_mode_send(
-                        self.conn.target_system,
-                        mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-                        self.modes['AUTO'])
-                    self.arm()
-                return msg
+            mt = msg.get_type()
+            if mt.startswith("MISSION") or mt == "STATUSTEXT":
+                print(msg)
+            if mt in handlers:
+                handlers[mt](msg)
+            return msg
 
     def set_rtl(self) -> None:
         """
@@ -188,13 +228,20 @@ class VehicleMav:
         print(self.wp.count())
         self.conn.waypoint_count_send(self.wp.count())
 
-    def load_search(self, coords: list[SMMPoint], search_id: int, on_search_begin, on_search_complete) -> None:
+    def load_search(self,
+                    coords: list[SMMPoint],
+                    search_id: int,
+                    on_search_begin: Callable | None = None,
+                    on_search_complete: Callable | None = None) -> None:
         """
         Load a search into the autopilot
         """
         self.search_id = search_id
-        self.on_search_begin = on_search_begin
-        self.on_search_complete = on_search_complete
+        if on_search_begin:
+            self.on("search_begin", on_search_begin)
+        if on_search_complete:
+            self.on("search_complete", on_search_complete)
+        self.search_state = "Loading"
         point = coords[0]
         self.wp = mavwp.MAVWPLoader(self.conn.target_system)
         self.wp.add(
