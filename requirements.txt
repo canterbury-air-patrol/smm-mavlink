@@ -2,5 +2,5 @@ smm-client==0.0.16
 pymavlink==2.4.47
 
 # code checking
-pycodestyle==2.13.0
+pycodestyle==2.14.0
 pylint==3.3.7
