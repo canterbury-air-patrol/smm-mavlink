@@ -3,4 +3,4 @@ pymavlink==2.4.49
 
 # code checking
 pycodestyle==2.14.0
-pylint==4.0.4
+pylint==4.0.5
